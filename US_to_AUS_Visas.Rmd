@@ -1,0 +1,679 @@
+---
+title: "US visa-class H-1B - Australia"
+author: "Fabricio Martin Irabuena"
+date: "6/15/2019"
+output: pdf_document
+urlcolor: blue
+---
+
+```{r setup, warning=FALSE, message=FALSE, echo=FALSE}
+#Setup-download data
+
+# Note: this process could take a couple of minutes
+
+if(!require(tidyverse)) install.packages("tidyverse", repos = "http://cran.us.r-project.org")
+if(!require(caret)) install.packages("caret", repos = "http://cran.us.r-project.org")
+if(!require(gridExtra)) install.packages("gridExtra", repos = "http://cran.us.r-project.org")
+if(!require(pander)) install.packages("pander", repos = "http://cran.us.r-project.org")
+if(!require(scales)) install.packages("scales", repos = "http://cran.us.r-project.org")
+if(!require(openxlsx)) install.packages("openxlsx", repos = "http://cran.us.r-project.org")
+
+#https://www.foreignlaborcert.doleta.gov/pdf/PerformanceData/2018/H-1B_Disclosure_Data_FY2018_EOY.xlsx
+
+temp <- tempfile()
+download.file("https://www.foreignlaborcert.doleta.gov/pdf/PerformanceData/2018/H-1B_Disclosure_Data_FY2018_EOY.xlsx",temp)
+
+data <- read.xlsx(temp)
+
+```
+
+# _OVERVIEW_
+
+The US working-visa Program.
+
+General program H-1B allows employers to temporarily employ foreign workers in the U.S. on a nonimmigrant basis in specialty occupations or as fashion models of distinguished merit and ability. A specialty occupation requires the theoretical and practical application of a body of specialized knowledge and a bachelor's degree or the equivalent in the specific specialty (e.g. sciences, medicine, health care, education, biotechnology, and business specialties, etc.).
+
+In particular E-3 for Australia allows employers to temporarily employ foreign workers from Australia in the U.S. on a nonimmigrant basis in specialty occupations. Current laws limit the annual number of qualifying foreign workers who may be issued an E-3 visa to 10,500 Australian nationals seeking temporary work in specialty occupations.
+
+In this analysis we focus on the Australian case. Where, we uses different _models_ to predict the application's results given for each application in 2018, that is called _CASE STATUS_ and we will be using _Accuracy_  as a performance messure.
+
+The base _data set_ included 52 variables with above 12 thousands obserbations, some of the variables without a clear predictive power, like the ones related with post-codes and phone-numbers will be removed.
+
+For more details on what each field means follow this link:
+https://www.foreignlaborcert.doleta.gov/pdf/PerformanceData/2018/H-1B_FY18_Record_Layout.pdf
+
+
+###The Method used for the analysis follows the steps:
+
+1 Preparing the data.
+
+2 Data exploration and visualization.
+
+3 Presenting the models and evaluating the results.
+
+4 Cross validation.
+
+5 Final evaluation of the model's predictions on the _test set_. 
+
+
+# _PREPARING DATA_
+
+The original _data set_ was constructed by selecting _E-3 Australian_ cases, Where each observation reflects the details in any sigle request. 
+
+```{r removing unused vars, warning=FALSE, message=FALSE, echo= FALSE}
+data_aus <- data %>% filter(VISA_CLASS=="E-3 Australian") %>% select(-c("VISA_CLASS","CASE_NUMBER","EMPLOYER_POSTAL_CODE","EMPLOYER_PHONE","EMPLOYER_ADDRESS","EMPLOYER_PHONE_EXT","WORKSITE_POSTAL_CODE","WORKSITE_COUNTY","WORKSITE_CITY","EMPLOYER_NAME","EMPLOYER_BUSINESS_DBA","EMPLOYER_BUSINESS_DBA","EMPLOYER_CITY","AGENT_ATTORNEY_NAME"))
+
+```
+
+```{r structure, warning=FALSE, message=FALSE, echo= FALSE}
+"data_aus" %>% pander()
+dim(data_aus)
+```
+
+We divide the _data aus_ in a  _train set_ set with the 80% (the all the known data) and a _test set_ with 20% of data (it will be consider as unknown data and will only be used for the final evaluation).
+
+A new fiel is added _contract_days_ = _EMPLOYMENT END DATE_ - _EMPLOYMENT START DATE_
+
+```{r data partition, warning=FALSE, message=FALSE, echo= FALSE}
+
+#############################################################
+# Create train set, test set.
+#############################################################
+
+data_aus$contract_days <- abs(data_aus$EMPLOYMENT_END_DATE - data_aus$EMPLOYMENT_START_DATE)
+
+library(caret)
+set.seed(754)
+test_index <- createDataPartition(y = data_aus$CASE_STATUS, times = 1, p = 0.2, list = FALSE)
+train_set <- data_aus[-test_index,]
+test_set <- data_aus[test_index,]
+"dimentions"
+("train_set ") %>% pander() 
+dim(train_set)
+("test_set ") %>% pander()
+dim(test_set)
+
+rm(test_index)
+```
+
+# _DATA EXPLORATION AND VISUALIZATION_
+
+Here are shown the _variable names_, how they are compounded and their _class_
+
+```{r data_exploration, warning=FALSE, message=FALSE, echo=FALSE}
+
+# Counting the number of unic values per column with the colname as an argument
+
+x <- as.numeric()
+z <- as.character()
+w <- as.character()
+
+t_times <- length(train_set)
+
+for(i in 1:t_times) {
+  x[i] <- count(distinct(train_set[i]))
+  z[i] <- colnames(train_set[i])
+  w[i] <- class(train_set[1,i])
+}
+
+y_uniques <- cbind(z,x,w) 
+colnames(y_uniques) <- c("var_name","uniques-factors","class")
+
+y_uniques %>% as.data.frame()
+
+train_set %>% group_by(CASE_STATUS) %>% summarize(number = n()) %>% pander()
+
+barplot(prop.table(table(train_set$CASE_STATUS)), col=rainbow(4))
+
+#ALL delete later
+
+rm(w,x,z,i)
+```
+
+# _PRESENTING THE MODELS_
+
+### Single model approach, _Random Forest_
+
+_Random Forest_ will be used as a first aproach model, and to get a general idea of the relative impact that each of the pre-selected variable has, thanks to the _importance_ function.
+
+Note: Only the varables with less than 50 uniques-factores where selected, that is the maximun the algoritm allows. In addition, _H1B-DEPENDENT_, _WILLFUL-VIOLATOR_ and _SUPPORT-H1B_ where not consider due to the extended number of _NA_ values within them.
+
+
+```{r adjust data for the rf model, warning=FALSE, message=FALSE, echo=FALSE}
+# preparing the data for training the models
+
+
+test_set$CASE_STATUS <- as.factor(test_set$CASE_STATUS)
+test_set$AGENT_REPRESENTING_EMPLOYER <- as.factor(test_set$AGENT_REPRESENTING_EMPLOYER)
+test_set$AMENDED_PETITION <- as.numeric(test_set$AMENDED_PETITION)
+test_set$PW_WAGE_LEVEL <- as.factor(test_set$PW_WAGE_LEVEL)
+test_set$EMPLOYER_COUNTRY <- as.factor(test_set$EMPLOYER_COUNTRY)
+test_set$WAGE_UNIT_OF_PAY <- as.factor(test_set$WAGE_UNIT_OF_PAY)
+test_set$FULL_TIME_POSITION <- as.factor(test_set$FULL_TIME_POSITION)
+test_set$PW_SOURCE <- as.factor(test_set$PW_SOURCE)
+test_set$PW_SOURCE_YEAR <- as.factor(test_set$PW_SOURCE_YEAR)
+test_set$NEW_CONCURRENT_EMP <- as.numeric(test_set$NEW_CONCURRENT_EMP)
+test_set$CHANGE_EMPLOYER <- as.numeric(test_set$CHANGE_EMPLOYER)
+test_set$CHANGE_PREVIOUS_EMPLOYMENT <- as.numeric(test_set$CHANGE_PREVIOUS_EMPLOYMENT)
+test_set$CONTINUED_EMPLOYMENT <- as.numeric(test_set$CONTINUED_EMPLOYMENT)
+test_set$NEW_EMPLOYMENT <- as.numeric(test_set$NEW_EMPLOYMENT)
+test_set$contract_days <- as.numeric(test_set$contract_days)
+
+ind <- is.na.data.frame(test_set$WAGE_UNIT_OF_PAY)
+index1 <- which(ind)
+ind <- is.na.data.frame(test_set$EMPLOYER_COUNTRY)
+index2 <- which(ind)
+ind <- is.na.data.frame(test_set$AMENDED_PETITION) 
+index3 <- which(ind)
+ind <- is.na.data.frame(test_set$FULL_TIME_POSITION)
+index4 <- which(ind)
+ind <- is.na.data.frame(test_set$AGENT_REPRESENTING_EMPLOYER)
+index5 <- which(ind)
+ind <- is.na.data.frame(test_set$PW_WAGE_LEVEL)
+index6 <- which(ind)
+ind <- is.na.data.frame(test_set$PW_SOURCE)
+index7 <- which(ind)
+ind <- is.na.data.frame(test_set$PW_SOURCE_YEAR)
+index8 <- which(ind)
+ind <- is.na.data.frame(test_set$NEW_CONCURRENT_EMP)
+index9 <- which(ind)
+ind <- is.na.data.frame(test_set$CHANGE_EMPLOYER)
+index10 <- which(ind)
+ind <- is.na.data.frame(test_set$CHANGE_PREVIOUS_EMPLOYMENT)
+index11 <- which(ind)
+ind <- is.na.data.frame(test_set$CONTINUED_EMPLOYMENT)
+index12 <- which(ind)
+ind <- is.na.data.frame(test_set$NEW_EMPLOYMENT)
+index13 <- which(ind)
+ind <- is.na.data.frame(test_set$PREVAILING_WAGE)
+index14 <- which(ind)
+ind <- is.na.data.frame(test_set$contract_days)
+index15 <- which(ind)
+ind <- is.na.data.frame(test_set$TOTAL_WORKERS)
+index16 <- which(ind)
+ind <- is.na.data.frame(test_set$WAGE_RATE_OF_PAY_FROM)
+index17 <- which(ind)
+ind <- is.na.data.frame(test_set$WAGE_RATE_OF_PAY_TO)
+index18 <- which(ind)
+
+# a few rows with NA are removed
+
+test_set_na <- test_set[-c(index1,index2,index3,index4,index5,index6,index7,index8,index9,index10,index11,index12,index13,index14,index15,index16,index17,index18),]
+
+train_set$CASE_STATUS <- as.factor(train_set$CASE_STATUS)
+train_set$AGENT_REPRESENTING_EMPLOYER <- as.factor(train_set$AGENT_REPRESENTING_EMPLOYER)
+train_set$AMENDED_PETITION <- as.numeric(train_set$AMENDED_PETITION)
+train_set$PW_WAGE_LEVEL <- as.factor(train_set$PW_WAGE_LEVEL)
+train_set$EMPLOYER_COUNTRY <- as.factor(train_set$EMPLOYER_COUNTRY)
+train_set$WAGE_UNIT_OF_PAY <- as.factor(train_set$WAGE_UNIT_OF_PAY)
+train_set$FULL_TIME_POSITION <- as.factor(train_set$FULL_TIME_POSITION)
+train_set$PW_SOURCE <- as.factor(train_set$PW_SOURCE)
+train_set$PW_SOURCE_YEAR <- as.factor(train_set$PW_SOURCE_YEAR)
+train_set$NEW_CONCURRENT_EMP <- as.numeric(train_set$NEW_CONCURRENT_EMP)
+train_set$CHANGE_EMPLOYER <- as.numeric(train_set$CHANGE_EMPLOYER)
+train_set$CHANGE_PREVIOUS_EMPLOYMENT <- as.numeric(train_set$CHANGE_PREVIOUS_EMPLOYMENT)
+train_set$CONTINUED_EMPLOYMENT <- as.numeric(train_set$CONTINUED_EMPLOYMENT)
+train_set$NEW_EMPLOYMENT <- as.numeric(train_set$NEW_EMPLOYMENT)
+train_set$contract_days <- as.numeric(train_set$contract_days)
+
+ind <- is.na.data.frame(train_set$WAGE_UNIT_OF_PAY)
+index1 <- which(ind)
+ind <- is.na.data.frame(train_set$EMPLOYER_COUNTRY)
+index2 <- which(ind)
+ind <- is.na.data.frame(train_set$AMENDED_PETITION) 
+index3 <- which(ind)
+ind <- is.na.data.frame(train_set$FULL_TIME_POSITION)
+index4 <- which(ind)
+ind <- is.na.data.frame(train_set$AGENT_REPRESENTING_EMPLOYER)
+index5 <- which(ind)
+ind <- is.na.data.frame(train_set$PW_WAGE_LEVEL)
+index6 <- which(ind)
+ind <- is.na.data.frame(train_set$PW_SOURCE)
+index7 <- which(ind)
+ind <- is.na.data.frame(train_set$PW_SOURCE_YEAR)
+index8 <- which(ind)
+ind <- is.na.data.frame(train_set$NEW_CONCURRENT_EMP)
+index9 <- which(ind)
+ind <- is.na.data.frame(train_set$CHANGE_EMPLOYER)
+index10 <- which(ind)
+ind <- is.na.data.frame(train_set$CHANGE_PREVIOUS_EMPLOYMENT)
+index11 <- which(ind)
+ind <- is.na.data.frame(train_set$CONTINUED_EMPLOYMENT)
+index12 <- which(ind)
+ind <- is.na.data.frame(train_set$NEW_EMPLOYMENT)
+index13 <- which(ind)
+ind <- is.na.data.frame(train_set$PREVAILING_WAGE)
+index14 <- which(ind)
+ind <- is.na.data.frame(train_set$contract_days)
+index15 <- which(ind)
+ind <- is.na.data.frame(train_set$TOTAL_WORKERS)
+index16 <- which(ind)
+ind <- is.na.data.frame(train_set$WAGE_RATE_OF_PAY_FROM)
+index17 <- which(ind)
+ind <- is.na.data.frame(train_set$WAGE_RATE_OF_PAY_TO)
+index18 <- which(ind)
+
+# a few rows with NA are removed
+
+train_set_na <- train_set[-c(index1,index2,index3,index4,index5,index6,index7,index8,index9,index10,index11,index12,index13,index14,index15,index16,index17,index18),]
+
+rm(ind,index1,index2,index3,index4,index5,index6,index7,index8,index9,index10,index11,index12,index13,index14,index15,index16,index17,index18)
+
+rm(train_set,test_set)
+
+# This line fixs an incompatibility issue between _RandodomForest_ and the _predict_ funtion
+test_set_na <- rbind(train_set_na[1, ] , test_set_na)
+test_set_na <- test_set_na[-1,]
+
+```
+
+```{r randomForest_model, warning=FALSE, message=FALSE, echo=FALSE}
+
+#variable importance
+
+set.seed(1)
+library(randomForest)
+randomForest_model <- randomForest(CASE_STATUS ~ AMENDED_PETITION+EMPLOYER_COUNTRY+WAGE_UNIT_OF_PAY+FULL_TIME_POSITION+AGENT_REPRESENTING_EMPLOYER+PW_WAGE_LEVEL+PW_SOURCE+PW_SOURCE_YEAR+NEW_CONCURRENT_EMP+CHANGE_EMPLOYER+CHANGE_PREVIOUS_EMPLOYMENT+NEW_EMPLOYMENT+CONTINUED_EMPLOYMENT+PREVAILING_WAGE+TOTAL_WORKERS+WAGE_RATE_OF_PAY_FROM+WAGE_RATE_OF_PAY_TO+contract_days, data=train_set_na)
+
+Accuracy_first_model <- confusionMatrix(predict(randomForest_model, newdata=train_set_na),as.factor(train_set_na$CASE_STATUS))
+
+Accuracy_first_model$overall["Accuracy"] %>% pander()
+
+# attributes(randomForest_model_opt)
+
+importance(randomForest_model) 
+varImpPlot(randomForest_model,
+           col= "dark blue",
+           main= "Variable Importance")
+
+```
+
+Now we are able to removed the variables with a very low impact on the model. In this scenario, we will pick out those with a _MeanDecreaseGini_ below 10.5
+
+After removing them, we can see that even with less variables the _Accuracy_ of the model remains at the same level or even increases. In other words, a simpler model with the same predicting power.
+
+```{r randomForest_model depured, warning=FALSE, message=FALSE, echo=FALSE}
+
+randomForest_model_opt <- randomForest(CASE_STATUS ~WAGE_UNIT_OF_PAY+AGENT_REPRESENTING_EMPLOYER+PW_WAGE_LEVEL+PW_SOURCE+PW_SOURCE_YEAR+CHANGE_EMPLOYER+CHANGE_PREVIOUS_EMPLOYMENT+CONTINUED_EMPLOYMENT+PREVAILING_WAGE+WAGE_RATE_OF_PAY_FROM+WAGE_RATE_OF_PAY_TO+contract_days, method = model, data=train_set_na)
+
+Accuracy_first_model_opt <- confusionMatrix(predict(randomForest_model_opt, newdata=train_set_na),as.factor(train_set_na$CASE_STATUS), positive = 'WITHDRAWN')
+
+Accuracy_first_model_opt$overall["Accuracy"] %>% pander()
+```
+
+
+Now, to get an better idea of the model's behavior, we take a look at the crossed table between the model's prediction and the actual data in the _train set_.
+
+
+```{r randomForest_model_opt predictions, warning=FALSE, message=FALSE, echo=FALSE}
+pred_rf_opt <- predict(randomForest_model_opt, newdata=train_set_na)
+
+crossed_table_train <- xtabs(~pred_rf_opt+CASE_STATUS, data=train_set_na)
+crossed_table_train 
+```
+
+
+### _Croos Validation_ on _Random Forest_
+
+We are taking many new _samples_ of the _data set_ to evaluate the model and find out what would be the expected _Accuracy_ on each new sampled _test set_, the selected _size_ is the same as in original setup. Within this case 50 new _samples_ were taken.
+
+```{r creating samples rf, warning=FALSE, message=FALSE, echo= FALSE}
+
+library(caret)
+
+set.seed(756)
+t_times <- 50  # Consider to update the number of samples to accelerate the upcoming chunk of code
+
+test_index <- createDataPartition(y = train_set_na$CASE_STATUS, times = t_times, p = 2.5/10, list = FALSE)
+```
+
+```{r Cross validation rf, warning=FALSE, message=FALSE, echo= FALSE}
+###################################################################################################
+            # CONSIDER TO UNLOCK "track_time", "pb","setTxtProgressBar" LINEs
+###################################################################################################
+Acc <- as.numeric()
+Acc_test <- as.numeric()
+for(i in 1:t_times){
+  
+    train_set_rf <- data_aus[-test_index[,i],]
+    dim(train_set_rf)
+    test_set_rf <- data_aus[test_index[,i],]
+    dim(test_set_rf)
+    
+
+train_set_rf$CASE_STATUS <- as.factor(train_set_rf$CASE_STATUS)
+train_set_rf$AGENT_REPRESENTING_EMPLOYER <- as.factor(train_set_rf$AGENT_REPRESENTING_EMPLOYER)
+train_set_rf$AMENDED_PETITION <- as.numeric(train_set_rf$AMENDED_PETITION)
+train_set_rf$PW_WAGE_LEVEL <- as.factor(train_set_rf$PW_WAGE_LEVEL)
+train_set_rf$EMPLOYER_COUNTRY <- as.factor(train_set_rf$EMPLOYER_COUNTRY)
+train_set_rf$WAGE_UNIT_OF_PAY <- as.factor(train_set_rf$WAGE_UNIT_OF_PAY)
+train_set_rf$FULL_TIME_POSITION <- as.factor(train_set_rf$FULL_TIME_POSITION)
+train_set_rf$PW_SOURCE <- as.factor(train_set_rf$PW_SOURCE)
+train_set_rf$PW_SOURCE_YEAR <- as.factor(train_set_rf$PW_SOURCE_YEAR)
+train_set_rf$NEW_CONCURRENT_EMP <- as.numeric(train_set_rf$NEW_CONCURRENT_EMP)
+train_set_rf$CHANGE_EMPLOYER <- as.numeric(train_set_rf$CHANGE_EMPLOYER)
+train_set_rf$CHANGE_PREVIOUS_EMPLOYMENT <- as.numeric(train_set_rf$CHANGE_PREVIOUS_EMPLOYMENT)
+train_set_rf$CONTINUED_EMPLOYMENT <- as.numeric(train_set_rf$CONTINUED_EMPLOYMENT)
+train_set_rf$NEW_EMPLOYMENT <- as.numeric(train_set_rf$NEW_EMPLOYMENT)
+train_set_rf$contract_days <- as.numeric(train_set_rf$contract_days)
+
+ind <- is.na.data.frame(train_set_rf$WAGE_UNIT_OF_PAY)
+index1 <- which(ind)
+ind <- is.na.data.frame(train_set_rf$EMPLOYER_COUNTRY)
+index2 <- which(ind)
+ind <- is.na.data.frame(train_set_rf$AMENDED_PETITION) 
+index3 <- which(ind)
+ind <- is.na.data.frame(train_set_rf$FULL_TIME_POSITION)
+index4 <- which(ind)
+ind <- is.na.data.frame(train_set_rf$AGENT_REPRESENTING_EMPLOYER)
+index5 <- which(ind)
+ind <- is.na.data.frame(train_set_rf$PW_WAGE_LEVEL)
+index6 <- which(ind)
+ind <- is.na.data.frame(train_set_rf$PW_SOURCE)
+index7 <- which(ind)
+ind <- is.na.data.frame(train_set_rf$PW_SOURCE_YEAR)
+index8 <- which(ind)
+ind <- is.na.data.frame(train_set_rf$NEW_CONCURRENT_EMP)
+index9 <- which(ind)
+ind <- is.na.data.frame(train_set_rf$CHANGE_EMPLOYER)
+index10 <- which(ind)
+ind <- is.na.data.frame(train_set_rf$CHANGE_PREVIOUS_EMPLOYMENT)
+index11 <- which(ind)
+ind <- is.na.data.frame(train_set_rf$CONTINUED_EMPLOYMENT)
+index12 <- which(ind)
+ind <- is.na.data.frame(train_set_rf$NEW_EMPLOYMENT)
+index13 <- which(ind)
+ind <- is.na.data.frame(train_set_rf$PREVAILING_WAGE)
+index14 <- which(ind)
+ind <- is.na.data.frame(train_set_rf$contract_days)
+index15 <- which(ind)
+ind <- is.na.data.frame(train_set_rf$TOTAL_WORKERS)
+index16 <- which(ind)
+ind <- is.na.data.frame(train_set_rf$WAGE_RATE_OF_PAY_FROM)
+index17 <- which(ind)
+ind <- is.na.data.frame(train_set_rf$WAGE_RATE_OF_PAY_TO)
+index18 <- which(ind)
+
+# a few rows with NA are removed
+
+train_set_rf_na <- train_set_rf[-c(index1,index2,index3,index4,index5,index6,index7,index8,index9,index10,index11,index12,index13,index14,index15,index16,index17,index18),]
+
+# This line fixs an incompatibility issue between _RandodomForest_ and the _predict_ funtion
+train_set_rf_na <- rbind(train_set_na[1, ] , train_set_rf_na)
+train_set_rf_na <- train_set_rf_na[-1,]  
+
+
+randomForest_model_opt <- randomForest(CASE_STATUS~WAGE_UNIT_OF_PAY+AGENT_REPRESENTING_EMPLOYER+PW_WAGE_LEVEL+PW_SOURCE+PW_SOURCE_YEAR+CHANGE_EMPLOYER+CHANGE_PREVIOUS_EMPLOYMENT+CONTINUED_EMPLOYMENT+PREVAILING_WAGE+WAGE_RATE_OF_PAY_FROM+WAGE_RATE_OF_PAY_TO+contract_days, method = model, data=train_set_rf_na)
+
+Accuracy_first_model_opt <- confusionMatrix(predict(randomForest_model_opt, newdata=train_set_rf_na),as.factor(train_set_rf_na$CASE_STATUS))
+
+Acc[i] <- Accuracy_first_model_opt$overall["Accuracy"]
+
+
+test_set_rf$CASE_STATUS <- as.factor(test_set_rf$CASE_STATUS)
+test_set_rf$AGENT_REPRESENTING_EMPLOYER <- as.factor(test_set_rf$AGENT_REPRESENTING_EMPLOYER)
+test_set_rf$AMENDED_PETITION <- as.numeric(test_set_rf$AMENDED_PETITION)
+test_set_rf$PW_WAGE_LEVEL <- as.factor(test_set_rf$PW_WAGE_LEVEL)
+test_set_rf$EMPLOYER_COUNTRY <- as.factor(test_set_rf$EMPLOYER_COUNTRY)
+test_set_rf$WAGE_UNIT_OF_PAY <- as.factor(test_set_rf$WAGE_UNIT_OF_PAY)
+test_set_rf$FULL_TIME_POSITION <- as.factor(test_set_rf$FULL_TIME_POSITION)
+test_set_rf$PW_SOURCE <- as.factor(test_set_rf$PW_SOURCE)
+test_set_rf$PW_SOURCE_YEAR <- as.factor(test_set_rf$PW_SOURCE_YEAR)
+test_set_rf$NEW_CONCURRENT_EMP <- as.numeric(test_set_rf$NEW_CONCURRENT_EMP)
+test_set_rf$CHANGE_EMPLOYER <- as.numeric(test_set_rf$CHANGE_EMPLOYER)
+test_set_rf$CHANGE_PREVIOUS_EMPLOYMENT <- as.numeric(test_set_rf$CHANGE_PREVIOUS_EMPLOYMENT)
+test_set_rf$CONTINUED_EMPLOYMENT <- as.numeric(test_set_rf$CONTINUED_EMPLOYMENT)
+test_set_rf$NEW_EMPLOYMENT <- as.numeric(test_set_rf$NEW_EMPLOYMENT)
+test_set_rf$contract_days <- as.numeric(test_set_rf$contract_days)
+
+ind <- is.na.data.frame(test_set_rf$WAGE_UNIT_OF_PAY)
+index1 <- which(ind)
+ind <- is.na.data.frame(test_set_rf$EMPLOYER_COUNTRY)
+index2 <- which(ind)
+ind <- is.na.data.frame(test_set_rf$AMENDED_PETITION) 
+index3 <- which(ind)
+ind <- is.na.data.frame(test_set_rf$FULL_TIME_POSITION)
+index4 <- which(ind)
+ind <- is.na.data.frame(test_set_rf$AGENT_REPRESENTING_EMPLOYER)
+index5 <- which(ind)
+ind <- is.na.data.frame(test_set_rf$PW_WAGE_LEVEL)
+index6 <- which(ind)
+ind <- is.na.data.frame(test_set_rf$PW_SOURCE)
+index7 <- which(ind)
+ind <- is.na.data.frame(test_set_rf$PW_SOURCE_YEAR)
+index8 <- which(ind)
+ind <- is.na.data.frame(test_set_rf$NEW_CONCURRENT_EMP)
+index9 <- which(ind)
+ind <- is.na.data.frame(test_set_rf$CHANGE_EMPLOYER)
+index10 <- which(ind)
+ind <- is.na.data.frame(test_set_rf$CHANGE_PREVIOUS_EMPLOYMENT)
+index11 <- which(ind)
+ind <- is.na.data.frame(test_set_rf$CONTINUED_EMPLOYMENT)
+index12 <- which(ind)
+ind <- is.na.data.frame(test_set_rf$NEW_EMPLOYMENT)
+index13 <- which(ind)
+ind <- is.na.data.frame(test_set_rf$PREVAILING_WAGE)
+index14 <- which(ind)
+ind <- is.na.data.frame(train_set_rf$contract_days)
+index15 <- which(ind)
+ind <- is.na.data.frame(test_set_rf$TOTAL_WORKERS)
+index16 <- which(ind)
+ind <- is.na.data.frame(test_set_rf$WAGE_RATE_OF_PAY_FROM)
+index17 <- which(ind)
+ind <- is.na.data.frame(test_set_rf$WAGE_RATE_OF_PAY_TO)
+index18 <- which(ind)
+
+# a few rows with NA are removed
+
+test_set_rf_na <- test_set_rf[-c(index1,index2,index3,index4,index5,index6,index7,index8,index9,index10,index11,index12,index13,index14,index15,index16,index17,index18),]
+
+# This line fixs an incompatibility issue between _RandodomForest_ and the _predict_ funtion
+test_set_rf_na <- rbind(train_set_na[1, ] , test_set_rf_na)
+test_set_rf_na <- test_set_rf_na[-1,] 
+
+Accuracy_first_model_opt_test <- confusionMatrix(predict(randomForest_model_opt, newdata=test_set_rf_na),as.factor(test_set_rf_na$CASE_STATUS))
+
+Acc_test[i] <- Accuracy_first_model_opt_test$overall["Accuracy"]
+
+  #pb <- txtProgressBar(0, t_times, style=3) # "pb"
+  #setTxtProgressBar(pb, i) # setTxtProgressBar
+
+}
+```
+
+```{r boxplot Acc_test, warning=FALSE, message=FALSE, echo= FALSE}
+
+boxplot(Acc_test, col = "dark orange", horizontal = TRUE, border = "black", xlab ="Stars", main ="Random Forest Accuracy-Dispersion") 
+
+summary(Acc_test) %>% pander()
+
+```
+
+
+
+### Multiple models approach, _Caret Package_
+
+Thanks to the _Caret Package_ features, we are able to train different models at the same time.
+The ones used here are:
+
+```{r picking the models, warning=FALSE, message=FALSE, echo=FALSE}
+models <- c("svmRadial","ranger","wsrf","kknn")
+models_long_name <- c("Support_Vector_Machine_Radial","ranger", "Weighted_Subspace_Random_Forest","k-Nearest Neighbors")
+print(models_long_name) 
+```
+
+```{r caret package, warning=FALSE, message=FALSE, echo=FALSE}
+length(models)
+
+fits <- lapply(models, function(model){ 
+  train(CASE_STATUS ~WAGE_UNIT_OF_PAY+AGENT_REPRESENTING_EMPLOYER+PW_WAGE_LEVEL+PW_SOURCE+PW_SOURCE_YEAR+CHANGE_EMPLOYER+CHANGE_PREVIOUS_EMPLOYMENT+CONTINUED_EMPLOYMENT+PREVAILING_WAGE+WAGE_RATE_OF_PAY_FROM+WAGE_RATE_OF_PAY_TO+contract_days, method = model, data=train_set_na)
+})
+
+
+```
+
+
+```{r results, warning=FALSE, message=FALSE, echo=FALSE}
+
+times <- length(models)
+
+res_test2 <- confusionMatrix(predict(fits[[1]], data=train_set_na),as.factor(train_set_na$CASE_STATUS))
+res_train2 <- confusionMatrix(predict(fits[[1]], data=train_set_na),as.factor(train_set_na$CASE_STATUS))
+
+
+res <- as.numeric()
+Accuracy_test_set <- as.numeric()
+Accuracy_train_set <- as.numeric()
+
+resultss <- for(i in 1:times){
+  
+    res_train2[[i]] <- confusionMatrix(predict(fits[[i]], data=train_set_na),as.factor(train_set_na$CASE_STATUS))
+    res_test2[[i]] <- confusionMatrix(predict(fits[[i]], newdata=test_set_na),as.factor(test_set_na$CASE_STATUS))
+    Accuracy_train_set[i] <- res_train2[[i]]$overall["Accuracy"]
+    Accuracy_test_set[i] <- res_test2[[i]]$overall["Accuracy"]  
+}
+
+Accuracy <- (Accuracy_train_set) %>% t()
+colnames(Accuracy) <- models
+Accuracy %>% pander()
+
+# predict(fits[[1]], data=train_set_na)
+# test_set$CASE_STATUS
+
+# max(fits[[1]][["results"]][["Accuracy"]])
+```
+
+### _Croos Validation_ on _Caret approach_
+
+We are taking many new _samples_ or _test set_ from the _train data_ to evaluate the all the models and find out what would be the expected _Accuracy_ on each new sampled _test set_, again the selected _size_ resembles the original setup. Within this case 50 new _samples_ were taken.
+
+```{r creating samples many, warning=FALSE, message=FALSE, echo= FALSE}
+
+library(caret)
+set.seed(756)
+n_times <- 50  # Consider to update the number of samples to accelerate the upcoming chunk of code
+
+test_index <- createDataPartition(y = train_set_na$CASE_STATUS, times = n_times, p = 2.5/10, list = FALSE)
+```
+
+```{r Cross validation Caret, warning=FALSE, message=FALSE, echo=FALSE}
+
+times <- length(models)
+
+res_test2 <- confusionMatrix(predict(fits[[1]], data=train_set_na),as.factor(train_set_na$CASE_STATUS))
+res_train2 <- confusionMatrix(predict(fits[[1]], data=train_set_na),as.factor(train_set_na$CASE_STATUS))
+
+res <- as.numeric()
+Accuracy_test_set <- as.numeric()
+Accuracy_train_set <- as.numeric()
+Accuracy_test_set_all <- as.numeric()
+Acc <- as.numeric()
+Acc_test <- as.numeric()
+
+resultss <- for(i in 1:times){
+  
+  for(j in 1:n_times){
+  #track_time[i] <- Sys.time()  # "track_time"
+  
+    train_set_rf <- data_aus[-test_index[,j],]
+    dim(train_set_rf)
+    test_set_rf <- data_aus[test_index[,j],]
+    dim(test_set_rf)
+
+test_set_rf$CASE_STATUS <- as.factor(test_set_rf$CASE_STATUS)
+test_set_rf$AGENT_REPRESENTING_EMPLOYER <- as.factor(test_set_rf$AGENT_REPRESENTING_EMPLOYER)
+test_set_rf$AMENDED_PETITION <- as.numeric(test_set_rf$AMENDED_PETITION)
+test_set_rf$PW_WAGE_LEVEL <- as.factor(test_set_rf$PW_WAGE_LEVEL)
+test_set_rf$EMPLOYER_COUNTRY <- as.factor(test_set_rf$EMPLOYER_COUNTRY)
+test_set_rf$WAGE_UNIT_OF_PAY <- as.factor(test_set_rf$WAGE_UNIT_OF_PAY)
+test_set_rf$FULL_TIME_POSITION <- as.factor(test_set_rf$FULL_TIME_POSITION)
+test_set_rf$PW_SOURCE <- as.factor(test_set_rf$PW_SOURCE)
+test_set_rf$PW_SOURCE_YEAR <- as.factor(test_set_rf$PW_SOURCE_YEAR)
+test_set_rf$NEW_CONCURRENT_EMP <- as.numeric(test_set_rf$NEW_CONCURRENT_EMP)
+test_set_rf$CHANGE_EMPLOYER <- as.numeric(test_set_rf$CHANGE_EMPLOYER)
+test_set_rf$CHANGE_PREVIOUS_EMPLOYMENT <- as.numeric(test_set_rf$CHANGE_PREVIOUS_EMPLOYMENT)
+test_set_rf$CONTINUED_EMPLOYMENT <- as.numeric(test_set_rf$CONTINUED_EMPLOYMENT)
+test_set_rf$NEW_EMPLOYMENT <- as.numeric(test_set_rf$NEW_EMPLOYMENT)
+test_set_rf$contract_days <- as.numeric(test_set_rf$contract_days)
+
+ind <- is.na.data.frame(test_set_rf$WAGE_UNIT_OF_PAY)
+index1 <- which(ind)
+ind <- is.na.data.frame(test_set_rf$EMPLOYER_COUNTRY)
+index2 <- which(ind)
+ind <- is.na.data.frame(test_set_rf$AMENDED_PETITION) 
+index3 <- which(ind)
+ind <- is.na.data.frame(test_set_rf$FULL_TIME_POSITION)
+index4 <- which(ind)
+ind <- is.na.data.frame(test_set_rf$AGENT_REPRESENTING_EMPLOYER)
+index5 <- which(ind)
+ind <- is.na.data.frame(test_set_rf$PW_WAGE_LEVEL)
+index6 <- which(ind)
+ind <- is.na.data.frame(test_set_rf$PW_SOURCE)
+index7 <- which(ind)
+ind <- is.na.data.frame(test_set_rf$PW_SOURCE_YEAR)
+index8 <- which(ind)
+ind <- is.na.data.frame(test_set_rf$NEW_CONCURRENT_EMP)
+index9 <- which(ind)
+ind <- is.na.data.frame(test_set_rf$CHANGE_EMPLOYER)
+index10 <- which(ind)
+ind <- is.na.data.frame(test_set_rf$CHANGE_PREVIOUS_EMPLOYMENT)
+index11 <- which(ind)
+ind <- is.na.data.frame(test_set_rf$CONTINUED_EMPLOYMENT)
+index12 <- which(ind)
+ind <- is.na.data.frame(test_set_rf$NEW_EMPLOYMENT)
+index13 <- which(ind)
+ind <- is.na.data.frame(test_set_rf$PREVAILING_WAGE)
+index14 <- which(ind)
+ind <- is.na.data.frame(test_set_rf$contract_days)
+index15 <- which(ind)
+ind <- is.na.data.frame(test_set_rf$TOTAL_WORKERS)
+index16 <- which(ind)
+ind <- is.na.data.frame(test_set_rf$WAGE_RATE_OF_PAY_FROM)
+index17 <- which(ind)
+ind <- is.na.data.frame(test_set_rf$WAGE_RATE_OF_PAY_TO)
+index18 <- which(ind)
+
+# a few rows with NA are removed
+
+test_set_rf_na <- test_set_rf[-c(index1,index2,index3,index4,index5,index6,index7,index8,index9,index10,index11,index12,index13,index14,index15,index16,index17,index18),]
+
+# This line fixs an incompatibility issue between _RandodomForest_ and the _predict_ funtion
+test_set_rf_na <- rbind(train_set_na[1, ] , test_set_rf_na)
+test_set_rf_na <- test_set_rf_na[-1,] 
+
+    
+     res_test2[[j]] <- confusionMatrix(predict(fits[[i]], newdata=test_set_rf_na),as.factor(test_set_rf_na$CASE_STATUS))
+
+Accuracy_test_set[j] <- res_test2[[j]]$overall["Accuracy"]
+
+  } 
+  
+  Accuracy_test_set_all[[i]] <- mean(Accuracy_test_set)
+  
+  #pb <- txtProgressBar(0, times, style=3) # "pb"
+  #setTxtProgressBar(pb, i) # setTxtProgressBar
+}
+
+Accuracy <- Accuracy_test_set_all %>% t()
+colnames(Accuracy) <- models
+rownames(Accuracy) <- "Mean-Accuracy"
+Accuracy %>% pander()
+
+# predict(fits[[1]], data=train_set_na)
+# test_set$CASE_STATUS
+# max(fits[[1]][["results"]][["Accuracy"]])
+```
+
+# _RESULTS_
+
+Finally, we are able to evaluate our best-performance's model _wsrf_ using the original _test set_. Which, remains yet as unknown data, and reveals the results under a possible real scenario.
+```{r final results, warning=FALSE, message=FALSE, echo=FALSE}
+Accuracy_test_set[3] %>% pander()
+```
+
+# _CONCLUSION_
+
+After following the steps in the Analisys, we have improved the base line of a _Single Model_ with a _Random Forest_ for predicting _CASE STATUS_, going through a _Multiple-models_ approach, thanks to the _Caret Package_ and finally we concluded that the highest _Accuracy_ was reached by the _wsrf_ model, with above 88%.
+
+
+Please follow this link to have access to the project files: https://github.com/AmadoLabX/Data_Science_HX
